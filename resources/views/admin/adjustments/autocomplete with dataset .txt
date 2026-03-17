@@ -1,0 +1,34 @@
+<script>
+        const input = document.getElementById('search-input');
+        input.addEventListener('input', async function() {
+            const query = input.value;
+
+            // Send an Ajax request to the server with the search query
+            const response = await fetch(`/admin/products/search?query=${encodeURIComponent(query)}`);
+            const suggestions = await response.json();
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            // Update the datalist with the autocomplete suggestions
+            const datalist = document.getElementById('suggestions-list');
+            datalist.innerHTML = '';
+
+            suggestions.suggestions.forEach(function(suggestion) {
+                const option = document.createElement('option');
+                option.value = suggestion.name;
+                option.setAttribute('data-price', suggestion.price);
+                option.setAttribute('data-tax', suggestion.tax);
+                option.setAttribute('data-id', suggestion.id);
+                datalist.appendChild(option);
+            });
+        });
+
+        input.addEventListener('change', function() {
+            const selectedOption = document.querySelector(`#suggestions-list option[value="${input.value}"]`);
+            const price = selectedOption.getAttribute('data-price');
+            const tax = selectedOption.getAttribute('data-tax');
+            const qty = selectedOption.getAttribute('data-qty');
+            console.log(`Price: ${price}, Tax: ${tax}, Qty: ${qty}`);
+        });
+    </script>
