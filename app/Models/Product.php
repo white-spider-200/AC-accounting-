@@ -42,8 +42,11 @@ class Product extends Model
     }
     public static function getProductsByWarehouse($defaultWarehouseId, $perPage = 10, $page = 1,$category=0)
     {
-        // Disable "only_full_group_by" mode
-        DB::statement('SET sql_mode=(SELECT REPLACE(@@sql_mode, "ONLY_FULL_GROUP_BY", ""))');
+        // The legacy query relaxes MySQL SQL mode to allow grouping by product id
+        // while selecting product columns. SQLite does not support this statement.
+        if (DB::connection()->getDriverName() === 'mysql') {
+            DB::statement('SET sql_mode=(SELECT REPLACE(@@sql_mode, "ONLY_FULL_GROUP_BY", ""))');
+        }
 
         $operand = ($category > 0) ? '=' :'>' ;
         $query = Product::leftJoin('product_warehouse', 'product_warehouse.product_id', '=', 'products.id')
@@ -71,8 +74,8 @@ class Product extends Model
                 'code' => $product->code,
                 'qty' => $product->quantity,
                 'measure_id' => $product->measure_id,
-                'measure' => $product->measure->label_en,
-                'currency' => $product->currency->code_en,
+                'measure' => optional($product->measure)->label_en,
+                'currency' => optional($product->currency)->code_en,
                 'image' => '/uploads/images/products/' . (empty($product->img) ? 'default.png' : $product->img),
             ];
         }

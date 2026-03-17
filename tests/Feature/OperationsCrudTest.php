@@ -4,10 +4,13 @@ namespace Tests\Feature;
 
 use App\Models\Client;
 use App\Models\Adjustment;
+use App\Models\Currency;
 use App\Models\Expense;
+use App\Models\Measure;
 use App\Models\PaymentStatus;
 use App\Models\PaymentType;
 use App\Models\Product;
+use App\Models\ProductsCategory;
 use App\Models\Purchase;
 use App\Models\PurchaseStatus;
 use App\Models\Sale;
@@ -23,6 +26,42 @@ use Tests\TestCase;
 class OperationsCrudTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_sales_pos_create_page_renders_under_sqlite()
+    {
+        $user = User::factory()->create(['type' => 1]);
+        $warehouse = Warehouse::create(['name' => 'Main', 'location' => 'HQ']);
+        Client::create(['name' => 'Walk In']);
+        SaleStatus::create(['name' => 'completed', 'label_en' => 'Completed', 'label_ar' => 'مكتمل']);
+        PaymentType::create(['name' => 'cash', 'label_en' => 'Cash', 'label_ar' => 'نقدي']);
+        $category = ProductsCategory::create(['name' => 'electronics', 'label_en' => 'Electronics', 'label_ar' => 'إلكترونيات']);
+        $measure = Measure::create(['name' => 'unit', 'label_en' => 'Unit', 'label_ar' => 'وحدة']);
+        $currency = Currency::create(['name' => 'Jordanian Dinar', 'code' => 'JOD', 'symbol' => 'JD']);
+        $product = Product::create([
+            'label_en' => 'POS Item',
+            'label_ar' => 'عنصر نقطة بيع',
+            'code' => 'POS-1',
+            'cost_price' => 10,
+            'price' => 15,
+            'tax' => 0,
+            'product_category_id' => $category->id,
+            'measure_id' => $measure->id,
+            'currency_id' => $currency->id,
+        ]);
+
+        DB::table('product_warehouse')->insert([
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouse->id,
+            'qty' => 5,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $response = $this->actingAs($user)->get(route('sales.create', ['pos' => 'true']));
+
+        $response->assertOk();
+        $response->assertSee('POS Item');
+    }
 
     public function test_expense_store_maps_legacy_form_fields_to_live_schema()
     {
