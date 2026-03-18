@@ -23,6 +23,7 @@ use App\Http\Controllers\SaleController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PaymentSaleController;
 use App\Http\Controllers\AccountingController;
+use App\Http\Controllers\VatRateController;
 
 use App\Http\Controllers\AdjustmentController;
 /*
@@ -238,6 +239,7 @@ Route::controller(AccountingController::class)->prefix('admin/accounting')->midd
     Route::get('/cashflow', 'cashflow')->name('accounting.cashflow');
     Route::get('/vat-summary', 'vatSummary')->name('accounting.vat-summary');
     Route::get('/gl-reports/trial-balance', 'trialBalance')->name('accounting.gl-reports.trial-balance');
+    Route::get('/gl-reports/ledger', 'ledgerReport')->name('accounting.gl-reports.ledger');
     Route::get('/gl-reports/profit-loss', 'glProfitAndLoss')->name('accounting.gl-reports.profit-loss');
     Route::get('/gl-reports/balance-sheet', 'balanceSheet')->name('accounting.gl-reports.balance-sheet');
     Route::get('/gl-reports/vat-summary', 'glVatSummary')->name('accounting.gl-reports.vat-summary');
@@ -261,4 +263,11 @@ Route::controller(AccountingController::class)->prefix('admin/accounting')->midd
     Route::post('/gl-management/periods', 'storePeriod')->name('accounting.gl-management.periods.store');
     Route::get('/gl-management/periods/{period}/edit', 'editPeriod')->name('accounting.gl-management.periods.edit');
     Route::put('/gl-management/periods/{period}', 'updatePeriod')->name('accounting.gl-management.periods.update');
+});
+
+Route::controller(VatRateController::class)->prefix('admin/accounting')->middleware(['auth', 'superadmin'])->group(function () {
+    Route::get('/gl-management/vat-rates', 'index')->name('accounting.gl-management.vat-rates');
+    Route::post('/gl-management/vat-rates', 'store')->name('accounting.gl-management.vat-rates.store');
+    Route::put('/gl-management/vat-rates/{vatRate}', 'update')->name('accounting.gl-management.vat-rates.update');
+    Route::delete('/gl-management/vat-rates/{vatRate}', 'destroy')->name('accounting.gl-management.vat-rates.delete');
 });

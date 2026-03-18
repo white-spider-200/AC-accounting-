@@ -13,6 +13,7 @@ class Expense extends Model
         'description',
         'expense_date',
         'expenses_category_id',
+        'client_id',
         'comment',
         'real_date',
         'price',
@@ -22,6 +23,11 @@ class Expense extends Model
     public function category()
     {
         return $this->belongsTo(ExpensesCategory::class, 'expenses_category_id');
+    }
+
+    public function client()
+    {
+        return $this->belongsTo(Client::class);
     }
 
     public function setRealDateAttribute($value)

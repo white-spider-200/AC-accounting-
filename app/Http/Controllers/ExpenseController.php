@@ -5,11 +5,15 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Expense;
 use App\Models\ExpensesCategory;
+use App\Services\Accounting\TransactionPostingService;
 
 use Illuminate\Http\Request;
 
 class ExpenseController extends Controller
 {
+    public function __construct(private readonly TransactionPostingService $transactionPostingService)
+    {
+    }
     /**
      * Display a listing of the resource.
      *
@@ -62,7 +66,8 @@ class ExpenseController extends Controller
         ]);
 
         // Create a new Warehouse model with the validated data
-        Expense::create($validatedData);
+        $expense = Expense::create($validatedData);
+        $this->transactionPostingService->postExpense($expense);
 
         // Redirect back to the index page with a success message
         return redirect()->route('expenses.index')
@@ -101,6 +106,7 @@ class ExpenseController extends Controller
         ]);
 
         $expense->update($validatedData);
+        $this->transactionPostingService->postExpense($expense->fresh());
         return redirect()->route('expenses.index')
             ->with('success', __('messages.expense_updated_successfully'));
     }

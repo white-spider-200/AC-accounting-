@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\Configuration;
 use App\Models\Role;
 use App\Models\User;
+use App\Models\VatRate;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 
@@ -38,6 +39,10 @@ class InitialSetupSeeder extends Seeder
                 ]
             );
         }
+
+        VatRate::firstOrCreate(['name' => 'VAT 22%'], ['rate' => 22, 'is_active' => true, 'sort_order' => 10]);
+        VatRate::firstOrCreate(['name' => 'VAT 15%'], ['rate' => 15, 'is_active' => true, 'sort_order' => 20]);
+        VatRate::firstOrCreate(['name' => 'VAT 0%'], ['rate' => 0, 'is_active' => true, 'sort_order' => 30]);
 
         User::updateOrCreate(
             ['email' => 'admin@example.com'],

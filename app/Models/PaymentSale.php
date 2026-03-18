@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use App\Services\Accounting\TransactionPostingService;
 
 class PaymentSale extends Model
 {
@@ -81,6 +82,7 @@ class PaymentSale extends Model
                 'sale_id' => $sale->id,
                 'amount' => $validatedData['paid'],
             ]);
+            app(TransactionPostingService::class)->postCustomerPayment($pivot->fresh('sale', 'payment'));
 
             $sale->payment_status_id = $sale->due <= 0 ? 3 : 2;
             $sale->save();

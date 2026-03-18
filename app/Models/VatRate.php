@@ -5,14 +5,15 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-class ExpensesCategory extends Model
+class VatRate extends Model
 {
     use HasFactory;
+
     protected $fillable = [
-        'name', 'comment', 'label_en', 'label_ar'
+        'name',
+        'rate',
+        'is_active',
+        'sort_order',
     ];
-    public function expenses()
-    {
-        return $this->hasMany(Expense::class);
-    }
 }
+

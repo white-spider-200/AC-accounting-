@@ -15,7 +15,7 @@
                     <th>{{ __('reports.columns.entry_no') }}</th>
                     <th>{{ __('reports.columns.description') }}</th>
                     <th>{{ __('reports.columns.status') }}</th>
-                    <th>{{ __('reports.columns.action') }}</th>
+                    <th>{{ __('reports.columns.amount') }}</th>
                 </tr>
             </thead>
             <tbody>

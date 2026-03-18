@@ -10,12 +10,17 @@ use App\Models\Warehouse;
 use App\Models\PurchaseDetail;
 use App\Models\PurchaseStatus;
 use App\Models\PaymentType;
+use App\Models\VatRate;
+use App\Services\Accounting\TransactionPostingService;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class PurchaseController extends Controller
 {
+    public function __construct(private readonly TransactionPostingService $transactionPostingService)
+    {
+    }
     /**
      * Display a listing of the resource.
      *
@@ -93,7 +98,8 @@ class PurchaseController extends Controller
         $warehouses = Warehouse::all();
         $suppliers = Supplier::all();
         $purchaseStatuses = PurchaseStatus::all();
-        return view('admin.purchases.create', compact('purchaseStatuses', 'warehouses', 'suppliers'));
+        $vatRates = VatRate::query()->where('is_active', true)->orderBy('sort_order')->orderBy('rate')->get();
+        return view('admin.purchases.create', compact('purchaseStatuses', 'warehouses', 'suppliers', 'vatRates'));
     }
 
     /**
@@ -138,6 +144,7 @@ class PurchaseController extends Controller
                 DB::commit();
             }
         }
+        $this->transactionPostingService->postPurchase($id);
 
         return session()->flash('success', __('Purchase Added Successfully'));
     }
@@ -154,8 +161,9 @@ class PurchaseController extends Controller
         $suppliers = Supplier::all();
         $purchaseStatuses = PurchaseStatus::all();
         $purchaseDetails = PurchaseDetail::where('purchase_id', $purchase->id)->get();
+        $vatRates = VatRate::query()->where('is_active', true)->orderBy('sort_order')->orderBy('rate')->get();
 
-        return view('admin.purchases.edit', compact('purchaseDetails', 'purchase', 'purchaseStatuses', 'warehouses', 'suppliers'));
+        return view('admin.purchases.edit', compact('purchaseDetails', 'purchase', 'purchaseStatuses', 'warehouses', 'suppliers', 'vatRates'));
     }
 
     /**
@@ -221,6 +229,7 @@ class PurchaseController extends Controller
                 }
             }
 
+            $this->transactionPostingService->postPurchase($purchase->fresh());
             DB::commit();
             return session()->flash('success', __('Purchase Added Successfully'));
         } catch (\Exception $e) {

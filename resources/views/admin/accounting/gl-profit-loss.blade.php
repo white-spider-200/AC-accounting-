@@ -33,12 +33,20 @@
             <div class="col-md-4">
                 <div class="card border-0 bg-light h-100">
                     <div class="card-body">
+                        <div class="fw-semibold">{{ __('COGS') }}</div>
+                        <div class="fs-3">{{ number_format($cogs, 3) }}</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card border-0 bg-light h-100">
+                    <div class="card-body">
                         <div class="fw-semibold">{{ __('Expenses') }}</div>
                         <div class="fs-3">{{ number_format($expenses, 3) }}</div>
                     </div>
                 </div>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-12">
                 <div class="card border-0 bg-light h-100">
                     <div class="card-body">
                         <div class="fw-semibold">{{ __('Net Profit') }}</div>

@@ -5,12 +5,16 @@ namespace App\Http\Controllers;
 use App\Models\Payment;
 use App\Models\Purchase;
 use App\Models\PaymentStatus;
+use App\Services\Accounting\TransactionPostingService;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class PaymentController extends Controller
 {
+    public function __construct(private readonly TransactionPostingService $transactionPostingService)
+    {
+    }
     /**
      * Store a newly created resource in storage.
      *
@@ -46,6 +50,7 @@ class PaymentController extends Controller
             $purchase->save();
 
             $returnedStatus = PaymentStatus::find($purchase->payment_status_id);
+            $this->transactionPostingService->postSupplierPayment($payment);
             $data = [
                 'message' => __('Payment Added Successfully'),
                 'newdue'=> $purchase->due,

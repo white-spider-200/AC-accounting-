@@ -2,56 +2,68 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Accounting\SaveAccountingMappingsRequest;
+use App\Http\Requests\Accounting\StoreGlAccountRequest;
+use App\Http\Requests\Accounting\StoreJournalEntryRequest;
+use App\Http\Requests\Accounting\StoreOpeningBalanceRequest;
+use App\Http\Requests\Accounting\StorePeriodRequest;
+use App\Http\Requests\Accounting\UpdateGlAccountRequest;
+use App\Http\Requests\Accounting\UpdatePeriodRequest;
 use App\Models\Client;
+use App\Models\GlAccount;
+use App\Models\GlJournalEntry;
 use App\Models\Supplier;
 use App\Models\Warehouse;
-use Carbon\Carbon;
+use App\Services\Accounting\BalanceSheetService;
+use App\Services\Accounting\CashflowService;
+use App\Services\Accounting\JournalPostingService;
+use App\Services\Accounting\LedgerReportService;
+use App\Services\Accounting\PayableReportService;
+use App\Services\Accounting\PeriodService;
+use App\Services\Accounting\ProfitLossService;
+use App\Services\Accounting\ReceivableReportService;
+use App\Services\Accounting\SetupService;
+use App\Services\Accounting\TransactionPostingService;
+use App\Services\Accounting\TrialBalanceService;
+use App\Services\Accounting\VatSummaryService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
-use Illuminate\Validation\Rule;
 
 class AccountingController extends Controller
 {
+    public function __construct(
+        private readonly SetupService $setupService,
+        private readonly ProfitLossService $profitLossService,
+        private readonly TrialBalanceService $trialBalanceService,
+        private readonly BalanceSheetService $balanceSheetService,
+        private readonly VatSummaryService $vatSummaryService,
+        private readonly ReceivableReportService $receivableReportService,
+        private readonly PayableReportService $payableReportService,
+        private readonly CashflowService $cashflowService,
+        private readonly JournalPostingService $journalPostingService,
+        private readonly TransactionPostingService $transactionPostingService,
+        private readonly PeriodService $periodService,
+        private readonly LedgerReportService $ledgerReportService,
+    ) {
+    }
+
     public function profitAndLoss(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request, ['warehouse_id', 'client_id']);
-        $salesQuery = DB::table('sales');
-        $this->applySaleFilters($salesQuery, $filters);
-
-        $revenue = (float) $salesQuery->sum('total_amount');
-
-        $cogsQuery = DB::table('sale_details')
-            ->join('sales', 'sales.id', '=', 'sale_details.sale_id');
-        $this->applySaleFilters($cogsQuery, $filters, 'sales');
-        $cogs = (float) $cogsQuery->sum('sale_details.total_price');
-
-        $expensesQuery = DB::table('expenses');
-        $this->applyDateRange($expensesQuery, 'expense_date', $filters['from'], $filters['to']);
-        $expenses = (float) $expensesQuery->sum('amount');
-
-        $grossProfit = $revenue - $cogs;
-        $netProfit = $grossProfit - $expenses;
-
-        $summary = [
-            ['label' => 'Revenue', 'value' => $revenue],
-            ['label' => 'COGS', 'value' => $cogs],
-            ['label' => 'Gross Profit', 'value' => $grossProfit],
-            ['label' => 'Expenses', 'value' => $expenses],
-            ['label' => 'Net Profit', 'value' => $netProfit, 'highlight' => true],
-        ];
+        $report = $this->profitLossService->generate($filters['from'], $filters['to']);
 
         if ($request->get('export') === 'excel') {
             return $this->exportCsv('profit-loss', [
                 ['Metric', 'Amount'],
-                ...collect($summary)->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all(),
+                ...collect($report['summary'])->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all(),
             ]);
         }
 
         if ($request->get('export') === 'pdf') {
             return $this->printView('Profit & Loss (P&L)', $filters, [
-                ['title' => 'Summary', 'headers' => ['Metric', 'Amount'], 'rows' => collect($summary)->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all()],
+                ['title' => 'Summary', 'headers' => ['Metric', 'Amount'], 'rows' => collect($report['summary'])->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all()],
             ]);
         }
 
@@ -60,21 +72,21 @@ class AccountingController extends Controller
             'filters' => $filters,
             'warehouses' => Warehouse::orderBy('name')->get(),
             'clients' => Client::orderBy('name')->get(),
-            'summary' => $summary,
+            'summary' => $report['summary'],
         ]);
     }
 
     public function accountsReceivable(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request, ['warehouse_id', 'client_id']);
-        $rows = $this->receivableRows($filters);
-        $aging = $this->agingBuckets($rows, 'due', 'date');
-        $totalReceivables = $rows->sum('due');
+        $report = $this->receivableReportService->generate($filters);
 
         if ($request->get('export') === 'excel') {
             return $this->exportCsv('accounts-receivable', array_merge(
                 [['Date', 'Client', 'Grand Total', 'Paid', 'Due', 'Status']],
-                $rows->map(fn ($row) => [
+                $report['rows']->map(fn ($row) => [
                     $row['date'],
                     $row['client_name'],
                     $this->money($row['grand_total']),
@@ -88,20 +100,12 @@ class AccountingController extends Controller
         if ($request->get('export') === 'pdf') {
             return $this->printView('Accounts Receivable (Customers)', $filters, [
                 ['title' => 'Totals', 'headers' => ['Metric', 'Amount'], 'rows' => [
-                    ['Total Receivables', $this->money($totalReceivables)],
-                    ['Aging 0-30', $this->money($aging['0_30'])],
-                    ['Aging 31-60', $this->money($aging['31_60'])],
-                    ['Aging 60+', $this->money($aging['60_plus'])],
+                    ['Total Receivables', $this->money($report['total_receivables'])],
+                    ['Aging 0-30', $this->money($report['aging']['0_30'])],
+                    ['Aging 31-60', $this->money($report['aging']['31_60'])],
+                    ['Aging 60+', $this->money($report['aging']['60_plus'])],
+                    ['AR Control (GL)', $this->money($report['gl_control_balance'])],
                 ]],
-                ['title' => 'Receivables', 'headers' => ['#', 'Date', 'Client', 'Grand Total', 'Paid', 'Due', 'Status'], 'rows' => $rows->map(fn ($row) => [
-                    $row['id'],
-                    $row['date'],
-                    $row['client_name'],
-                    $this->money($row['grand_total']),
-                    $this->money($row['paid']),
-                    $this->money($row['due']),
-                    $row['status'],
-                ])->all()],
             ]);
         }
 
@@ -110,23 +114,23 @@ class AccountingController extends Controller
             'filters' => $filters,
             'warehouses' => Warehouse::orderBy('name')->get(),
             'clients' => Client::orderBy('name')->get(),
-            'rows' => $rows,
-            'totalReceivables' => $totalReceivables,
-            'aging' => $aging,
+            'rows' => $report['rows'],
+            'totalReceivables' => $report['total_receivables'],
+            'aging' => $report['aging'],
         ]);
     }
 
     public function accountsPayable(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request, ['warehouse_id', 'supplier_id']);
-        $rows = $this->payableRows($filters);
-        $aging = $this->agingBuckets($rows, 'due', 'date');
-        $totalPayables = $rows->sum('due');
+        $report = $this->payableReportService->generate($filters);
 
         if ($request->get('export') === 'excel') {
             return $this->exportCsv('accounts-payable', array_merge(
                 [['Date', 'Supplier', 'Grand Total', 'Paid', 'Due', 'Status']],
-                $rows->map(fn ($row) => [
+                $report['rows']->map(fn ($row) => [
                     $row['date'],
                     $row['supplier_name'],
                     $this->money($row['grand_total']),
@@ -140,20 +144,12 @@ class AccountingController extends Controller
         if ($request->get('export') === 'pdf') {
             return $this->printView('Accounts Payable (Suppliers)', $filters, [
                 ['title' => 'Totals', 'headers' => ['Metric', 'Amount'], 'rows' => [
-                    ['Total Payables', $this->money($totalPayables)],
-                    ['Aging 0-30', $this->money($aging['0_30'])],
-                    ['Aging 31-60', $this->money($aging['31_60'])],
-                    ['Aging 60+', $this->money($aging['60_plus'])],
+                    ['Total Payables', $this->money($report['total_payables'])],
+                    ['Aging 0-30', $this->money($report['aging']['0_30'])],
+                    ['Aging 31-60', $this->money($report['aging']['31_60'])],
+                    ['Aging 60+', $this->money($report['aging']['60_plus'])],
+                    ['AP Control (GL)', $this->money($report['gl_control_balance'])],
                 ]],
-                ['title' => 'Payables', 'headers' => ['#', 'Date', 'Supplier', 'Grand Total', 'Paid', 'Due', 'Status'], 'rows' => $rows->map(fn ($row) => [
-                    $row['id'],
-                    $row['date'],
-                    $row['supplier_name'],
-                    $this->money($row['grand_total']),
-                    $this->money($row['paid']),
-                    $this->money($row['due']),
-                    $row['status'],
-                ])->all()],
             ]);
         }
 
@@ -162,103 +158,44 @@ class AccountingController extends Controller
             'filters' => $filters,
             'warehouses' => Warehouse::orderBy('name')->get(),
             'suppliers' => Supplier::orderBy('name')->get(),
-            'rows' => $rows,
-            'totalPayables' => $totalPayables,
-            'aging' => $aging,
+            'rows' => $report['rows'],
+            'totalPayables' => $report['total_payables'],
+            'aging' => $report['aging'],
         ]);
     }
 
     public function cashflow(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request);
+        $report = $this->cashflowService->generate($filters['from'], $filters['to']);
 
-        $incomingByMethod = DB::table('payment_sales')
-            ->join('payments', 'payments.id', '=', 'payment_sales.payment_id')
-            ->leftJoin('payment_types', 'payment_types.id', '=', 'payments.payment_type_id')
-            ->selectRaw("COALESCE(payment_types.label_en, payment_types.name, 'Unknown') as payment_method")
-            ->selectRaw('SUM(COALESCE(payment_sales.amount, payments.amount, 0)) as total');
-        $this->applyDateRange($incomingByMethod, 'payments.payment_date', $filters['from'], $filters['to']);
-        $incomingByMethod = $incomingByMethod
-            ->groupBy('payment_method')
-            ->orderBy('payment_method')
-            ->get()
-            ->map(fn ($row) => [
-                'payment_method' => $row->payment_method,
-                'total' => (float) $row->total,
-            ]);
+        $incomingByMethod = collect([
+            ['payment_method' => 'Operating Activities', 'total' => max($report['operating'], 0)],
+            ['payment_method' => 'Investing Activities', 'total' => max($report['investing'], 0)],
+            ['payment_method' => 'Financing Activities', 'total' => max($report['financing'], 0)],
+        ]);
 
-        $outgoingPayments = DB::table('payments')
-            ->leftJoin('payment_types', 'payment_types.id', '=', 'payments.payment_type_id')
-            ->whereNotExists(function ($query) {
-                $query->select(DB::raw(1))
-                    ->from('payment_sales')
-                    ->whereColumn('payment_sales.payment_id', 'payments.id');
-            })
-            ->selectRaw("COALESCE(payment_types.label_en, payment_types.name, 'Unknown') as payment_method")
-            ->selectRaw('SUM(payments.amount) as total');
-        $this->applyDateRange($outgoingPayments, 'payments.payment_date', $filters['from'], $filters['to']);
-        $outgoingPayments = $outgoingPayments
-            ->groupBy('payment_method')
-            ->orderBy('payment_method')
-            ->get()
-            ->map(fn ($row) => [
-                'payment_method' => $row->payment_method,
-                'total' => (float) $row->total,
-            ]);
+        $outgoingPayments = collect([
+            ['payment_method' => 'Operating Activities', 'total' => abs(min($report['operating'], 0))],
+            ['payment_method' => 'Investing Activities', 'total' => abs(min($report['investing'], 0))],
+            ['payment_method' => 'Financing Activities', 'total' => abs(min($report['financing'], 0))],
+        ]);
 
-        $expensesByCategory = DB::table('expenses')
-            ->leftJoin('expenses_categories', 'expenses_categories.id', '=', 'expenses.expenses_category_id')
-            ->selectRaw("COALESCE(expenses_categories.label_en, expenses_categories.name, 'Uncategorized') as category")
-            ->selectRaw('SUM(expenses.amount) as total');
-        $this->applyDateRange($expensesByCategory, 'expenses.expense_date', $filters['from'], $filters['to']);
-        $expensesByCategory = $expensesByCategory
-            ->groupBy('category')
-            ->orderBy('category')
-            ->get()
-            ->map(fn ($row) => [
-                'category' => $row->category,
-                'total' => (float) $row->total,
-            ]);
-
-        $incomingTotal = $incomingByMethod->sum('total');
-        $outgoingTotal = $outgoingPayments->sum('total');
-        $expensesTotal = $expensesByCategory->sum('total');
-        $netCash = $incomingTotal - $outgoingTotal - $expensesTotal;
+        $expensesByCategory = collect([
+            ['category' => 'Net Cash Movement', 'total' => $report['net_cash']],
+        ]);
 
         if ($request->get('export') === 'excel') {
-            $rows = [
-                ['Incoming Total', $this->money($incomingTotal)],
-                ['Outgoing Total', $this->money($outgoingTotal)],
-                ['Net Cash', $this->money($netCash)],
-                ['Total Expenses', $this->money($expensesTotal)],
-                [],
-                ['Incoming by Payment Method'],
-                ['Payment Method', 'Total'],
-                ...$incomingByMethod->map(fn ($row) => [$row['payment_method'], $this->money($row['total'])])->all(),
-                [],
-                ['Outgoing (Purchases) by Payment Method'],
-                ['Payment Method', 'Total'],
-                ...$outgoingPayments->map(fn ($row) => [$row['payment_method'], $this->money($row['total'])])->all(),
-                [],
-                ['Expenses by Category'],
-                ['Expense Category', 'Total'],
-                ...$expensesByCategory->map(fn ($row) => [$row['category'], $this->money($row['total'])])->all(),
-            ];
-
-            return $this->exportCsv('cashflow', $rows);
-        }
-
-        if ($request->get('export') === 'pdf') {
-            return $this->printView('Cashflow', $filters, [
-                ['title' => 'Totals', 'headers' => ['Metric', 'Amount'], 'rows' => [
-                    ['Incoming Total', $this->money($incomingTotal)],
-                    ['Outgoing Total', $this->money($outgoingTotal)],
-                    ['Net Cash', $this->money($netCash)],
-                    ['Total Expenses', $this->money($expensesTotal)],
-                ]],
-                ['title' => 'Incoming by Payment Method', 'headers' => ['Payment Method', 'Total'], 'rows' => $incomingByMethod->map(fn ($row) => [$row['payment_method'], $this->money($row['total'])])->all()],
-                ['title' => 'Outgoing (Purchases) by Payment Method', 'headers' => ['Payment Method', 'Total'], 'rows' => $outgoingPayments->map(fn ($row) => [$row['payment_method'], $this->money($row['total'])])->all()],
-                ['title' => 'Expenses by Category', 'headers' => ['Expense Category', 'Total'], 'rows' => $expensesByCategory->map(fn ($row) => [$row['category'], $this->money($row['total'])])->all()],
+            return $this->exportCsv('cashflow', [
+                ['Metric', 'Amount'],
+                ['Incoming Total', $this->money($report['incoming_total'])],
+                ['Outgoing Total', $this->money($report['outgoing_total'])],
+                ['Net Cash', $this->money($report['net_cash'])],
+                ['Operating', $this->money($report['operating'])],
+                ['Investing', $this->money($report['investing'])],
+                ['Financing', $this->money($report['financing'])],
             ]);
         }
 
@@ -268,42 +205,30 @@ class AccountingController extends Controller
             'incomingByMethod' => $incomingByMethod,
             'outgoingPayments' => $outgoingPayments,
             'expensesByCategory' => $expensesByCategory,
-            'incomingTotal' => $incomingTotal,
-            'outgoingTotal' => $outgoingTotal,
-            'expensesTotal' => $expensesTotal,
-            'netCash' => $netCash,
+            'incomingTotal' => $report['incoming_total'],
+            'outgoingTotal' => $report['outgoing_total'],
+            'expensesTotal' => $report['outgoing_total'],
+            'netCash' => $report['net_cash'],
         ]);
     }
 
     public function vatSummary(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request, ['warehouse_id', 'client_id', 'supplier_id']);
-
-        $salesVatQuery = DB::table('sales');
-        $this->applySaleFilters($salesVatQuery, $filters);
-        $vatCollected = (float) $salesVatQuery->sum('tax_amount');
-
-        $purchasesVatQuery = DB::table('purchases');
-        $this->applyPurchaseFilters($purchasesVatQuery, $filters);
-        $vatPaid = (float) $purchasesVatQuery->sum('tax_amount');
-
-        $vatNet = $vatCollected - $vatPaid;
-        $summary = [
-            ['label' => 'VAT Collected (Sales)', 'value' => $vatCollected],
-            ['label' => 'VAT Paid (Purchases)', 'value' => $vatPaid],
-            ['label' => 'VAT Net', 'value' => $vatNet, 'highlight' => true],
-        ];
+        $report = $this->vatSummaryService->generate($filters['from'], $filters['to']);
 
         if ($request->get('export') === 'excel') {
             return $this->exportCsv('vat-summary', [
                 ['Metric', 'Amount'],
-                ...collect($summary)->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all(),
+                ...collect($report['summary'])->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all(),
             ]);
         }
 
         if ($request->get('export') === 'pdf') {
             return $this->printView('VAT Summary', $filters, [
-                ['title' => 'Summary', 'headers' => ['Metric', 'Amount'], 'rows' => collect($summary)->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all()],
+                ['title' => 'Summary', 'headers' => ['Metric', 'Amount'], 'rows' => collect($report['summary'])->map(fn ($row) => [$row['label'], $this->money($row['value'])])->all()],
             ]);
         }
 
@@ -313,119 +238,123 @@ class AccountingController extends Controller
             'warehouses' => Warehouse::orderBy('name')->get(),
             'clients' => Client::orderBy('name')->get(),
             'suppliers' => Supplier::orderBy('name')->get(),
-            'summary' => $summary,
+            'summary' => $report['summary'],
         ]);
     }
 
     public function trialBalance(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request);
-        $accounts = $this->glAccounts($filters);
-        $totals = [
-            'debit' => $accounts->sum('debit'),
-            'credit' => $accounts->sum('credit'),
-            'balance' => $accounts->sum('balance'),
-        ];
+        $trial = $this->trialBalanceService->generate($filters['from'], $filters['to']);
 
         return view('admin.accounting.gl-trial-balance', [
             'title' => 'Trial Balance',
             'filters' => $filters,
+            'accounts' => $trial['rows'],
+            'totals' => $trial['totals'],
+        ]);
+    }
+
+    public function ledgerReport(Request $request)
+    {
+        $this->setupService->ensureInitialized();
+
+        $filters = $this->baseFilters($request, ['account_id']);
+        $accounts = GlAccount::query()->where('is_active', true)->orderBy('code')->get();
+        $report = null;
+
+        if (! empty($filters['account_id'])) {
+            $report = $this->ledgerReportService->accountLedger((int) $filters['account_id'], $filters['from'], $filters['to']);
+        }
+
+        return view('admin.accounting.gl-ledger', [
+            'title' => 'GL Report',
+            'filters' => $filters,
             'accounts' => $accounts,
-            'totals' => $totals,
+            'report' => $report,
         ]);
     }
 
     public function glProfitAndLoss(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request);
-        $snapshot = $this->glSnapshot($filters);
-        $rows = collect([
-            [
-                'type' => 'Revenue',
-                'code' => '4100',
-                'account' => 'Sales Revenue',
-                'balance' => $snapshot['revenue'],
-            ],
-            [
-                'type' => 'Expense',
-                'code' => '5100',
-                'account' => 'Operating Expenses',
-                'balance' => $snapshot['expenses'],
-            ],
-        ]);
+        $report = $this->profitLossService->generate($filters['from'], $filters['to']);
 
         return view('admin.accounting.gl-profit-loss', [
             'title' => 'Profit & Loss',
             'filters' => $filters,
-            'rows' => $rows,
-            'revenue' => $snapshot['revenue'],
-            'expenses' => $snapshot['expenses'],
-            'netProfit' => $snapshot['net_profit'],
+            'rows' => collect([
+                ['type' => 'Revenue', 'code' => '4100', 'account' => 'Sales Revenue', 'balance' => $report['revenue']],
+                ['type' => 'Expense', 'code' => '5100', 'account' => 'Cost of Goods Sold (COGS)', 'balance' => $report['cogs']],
+                ['type' => 'Expense', 'code' => '5999', 'account' => 'General Expense (Unmapped)', 'balance' => $report['operating_expenses']],
+            ]),
+            'revenue' => $report['revenue'],
+            'cogs' => $report['cogs'],
+            'operatingExpenses' => $report['operating_expenses'],
+            'expenses' => $report['cogs'] + $report['operating_expenses'],
+            'netProfit' => $report['net_profit'],
         ]);
     }
 
     public function balanceSheet(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = [
             'as_of' => $request->input('as_of', now()->toDateString()),
         ];
-        $snapshot = $this->glSnapshot([
-            'from' => null,
-            'to' => $filters['as_of'],
-        ]);
-
-        $rows = collect([
-            ['type' => 'Asset', 'code' => '1110', 'account' => 'Cash', 'balance' => $snapshot['cash']],
-            ['type' => 'Asset', 'code' => '1130', 'account' => 'Accounts Receivable', 'balance' => $snapshot['accounts_receivable']],
-            ['type' => 'Asset', 'code' => '1140', 'account' => 'Inventory', 'balance' => $snapshot['inventory']],
-            ['type' => 'Asset', 'code' => '1150', 'account' => 'VAT Input (Recoverable)', 'balance' => $snapshot['vat_input']],
-            ['type' => 'Liability', 'code' => '2110', 'account' => 'Accounts Payable', 'balance' => $snapshot['accounts_payable']],
-            ['type' => 'Liability', 'code' => '2120', 'account' => 'VAT Output (Payable)', 'balance' => $snapshot['vat_output']],
-        ]);
+        $report = $this->balanceSheetService->generate($filters['as_of']);
 
         return view('admin.accounting.gl-balance-sheet', [
             'title' => 'Balance Sheet',
             'filters' => $filters,
-            'rows' => $rows,
-            'assets' => $snapshot['assets'],
-            'liabilities' => $snapshot['liabilities'],
-            'equity' => $snapshot['equity'],
-            'liabilitiesAndEquity' => $snapshot['liabilities'] + $snapshot['equity'],
+            'rows' => $report['rows'],
+            'assets' => $report['assets'],
+            'liabilities' => $report['liabilities'],
+            'equity' => $report['equity'],
+            'liabilitiesAndEquity' => $report['liabilities_and_equity'],
         ]);
     }
 
     public function glVatSummary(Request $request)
     {
+        $this->setupService->ensureInitialized();
+
         $filters = $this->baseFilters($request);
-        $snapshot = $this->glSnapshot($filters);
-        $lines = $this->glVatLines($filters);
+        $report = $this->vatSummaryService->generate($filters['from'], $filters['to']);
 
         return view('admin.accounting.gl-vat-summary', [
             'title' => 'reports.gl.vat_summary',
             'filters' => $filters,
-            'vatCollected' => $snapshot['vat_output'],
-            'vatPaid' => $snapshot['vat_input'],
-            'vatNet' => $snapshot['vat_output'] - $snapshot['vat_input'],
-            'lines' => $lines,
+            'vatCollected' => $report['vat_collected'],
+            'vatPaid' => $report['vat_paid'],
+            'vatNet' => $report['vat_net'],
+            'lines' => $report['lines'],
         ]);
     }
 
     public function chartOfAccounts()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $accounts = DB::table('gl_accounts as accounts')
-            ->leftJoin('gl_accounts as parents', 'parents.id', '=', 'accounts.parent_id')
-            ->orderBy('accounts.code')
-            ->get([
-                'accounts.id',
-                'accounts.code',
-                'accounts.name',
-                'accounts.name_ar',
-                'accounts.type',
-                'accounts.is_active',
-                'parents.code as parent_code',
-                'parents.name as parent_name',
+        $accounts = GlAccount::query()
+            ->with('parent')
+            ->orderBy('code')
+            ->get()
+            ->map(fn (GlAccount $account) => (object) [
+                'id' => $account->id,
+                'code' => $account->code,
+                'name' => $account->name,
+                'name_ar' => $account->name_ar,
+                'type' => $account->type,
+                'normal_balance' => $account->normal_balance,
+                'is_active' => $account->is_active,
+                'parent_code' => $account->parent?->code,
+                'parent_name' => $account->parent?->name,
             ]);
 
         return view('admin.accounting.chart-of-accounts', [
@@ -434,14 +363,14 @@ class AccountingController extends Controller
         ]);
     }
 
-    public function journalEntries()
+    public function journalEntries(Request $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $entries = DB::table('gl_journal_entries')
-            ->when(request('status'), fn ($query, $status) => $query->where('status', $status))
-            ->when(request('from'), fn ($query, $from) => $query->whereDate('entry_date', '>=', $from))
-            ->when(request('to'), fn ($query, $to) => $query->whereDate('entry_date', '<=', $to))
+        $entries = GlJournalEntry::query()
+            ->when($request->input('status'), fn ($query, $status) => $query->where('status', $status))
+            ->when($request->input('from'), fn ($query, $from) => $query->whereDate('entry_date', '>=', $from))
+            ->when($request->input('to'), fn ($query, $to) => $query->whereDate('entry_date', '<=', $to))
             ->orderByDesc('entry_date')
             ->orderByDesc('id')
             ->paginate(20)
@@ -451,18 +380,18 @@ class AccountingController extends Controller
             'title' => 'Journal Entries',
             'entries' => $entries,
             'filters' => [
-                'status' => request('status'),
-                'from' => request('from'),
-                'to' => request('to'),
+                'status' => $request->input('status'),
+                'from' => $request->input('from'),
+                'to' => $request->input('to'),
             ],
         ]);
     }
 
     public function accountingMappings()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $accounts = DB::table('gl_accounts')->orderBy('code')->get();
+        $accounts = GlAccount::query()->orderBy('code')->get();
         $coreMappings = DB::table('gl_accounting_mappings')
             ->where('group_type', 'core')
             ->orderBy('label')
@@ -501,12 +430,20 @@ class AccountingController extends Controller
 
     public function openingBalances()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $records = DB::table('gl_opening_balances')
+        $records = GlJournalEntry::query()
+            ->where('is_opening', true)
             ->orderByDesc('entry_date')
             ->orderByDesc('id')
-            ->get();
+            ->get()
+            ->map(fn (GlJournalEntry $entry) => (object) [
+                'entry_date' => $entry->entry_date?->toDateString() ?? $entry->entry_date,
+                'entry_no' => $entry->entry_no,
+                'description' => $entry->description,
+                'status' => $entry->status,
+                'amount' => $entry->amount,
+            ]);
 
         return view('admin.accounting.opening-balances', [
             'title' => 'reports.opening.title',
@@ -516,11 +453,9 @@ class AccountingController extends Controller
 
     public function periods()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $periods = DB::table('gl_periods')
-            ->orderByDesc('period')
-            ->get();
+        $periods = DB::table('gl_periods')->orderByDesc('period')->get();
 
         return view('admin.accounting.periods', [
             'title' => 'reports.periods.title',
@@ -530,38 +465,32 @@ class AccountingController extends Controller
 
     public function createAccount()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.account-form', [
             'title' => 'Add Account',
             'account' => null,
-            'parents' => DB::table('gl_accounts')->orderBy('code')->get(),
-            'types' => $this->accountTypes(),
+            'parents' => GlAccount::query()->orderBy('code')->get(),
+            'types' => ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'],
         ]);
     }
 
-    public function storeAccount(Request $request)
+    public function storeAccount(StoreGlAccountRequest $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'code' => ['required', 'string', 'max:20', 'unique:gl_accounts,code'],
-            'name' => ['required', 'string', 'max:255'],
-            'name_ar' => ['nullable', 'string', 'max:255'],
-            'type' => ['required', Rule::in($this->accountTypes())],
-            'parent_id' => ['nullable', 'exists:gl_accounts,id'],
-            'is_active' => ['nullable', 'boolean'],
-        ]);
+        $validated = $request->validated();
+        $normalBalance = $validated['normal_balance'] ?? (in_array($validated['type'], ['Asset', 'Expense'], true) ? 'debit' : 'credit');
 
-        DB::table('gl_accounts')->insert([
+        GlAccount::query()->create([
             'code' => $validated['code'],
             'name' => $validated['name'],
             'name_ar' => $validated['name_ar'] ?? null,
             'type' => $validated['type'],
+            'category' => $validated['category'] ?? null,
+            'normal_balance' => $normalBalance,
             'parent_id' => $validated['parent_id'] ?? null,
             'is_active' => $request->boolean('is_active'),
-            'created_at' => now(),
-            'updated_at' => now(),
         ]);
 
         return redirect()->route('accounting.gl-management.chart-of-accounts')->with('success', __('Account added successfully'));
@@ -569,77 +498,62 @@ class AccountingController extends Controller
 
     public function editAccount(int $account)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.account-form', [
             'title' => 'Edit Account',
-            'account' => DB::table('gl_accounts')->where('id', $account)->firstOrFail(),
-            'parents' => DB::table('gl_accounts')->where('id', '!=', $account)->orderBy('code')->get(),
-            'types' => $this->accountTypes(),
+            'account' => GlAccount::query()->findOrFail($account),
+            'parents' => GlAccount::query()->where('id', '!=', $account)->orderBy('code')->get(),
+            'types' => ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'],
         ]);
     }
 
-    public function updateAccount(Request $request, int $account)
+    public function updateAccount(UpdateGlAccountRequest $request, int $account)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'code' => ['required', 'string', 'max:20', Rule::unique('gl_accounts', 'code')->ignore($account)],
-            'name' => ['required', 'string', 'max:255'],
-            'name_ar' => ['nullable', 'string', 'max:255'],
-            'type' => ['required', Rule::in($this->accountTypes())],
-            'parent_id' => ['nullable', 'exists:gl_accounts,id'],
-            'is_active' => ['nullable', 'boolean'],
+        $validated = $request->validated();
+        $normalBalance = $validated['normal_balance'] ?? (in_array($validated['type'], ['Asset', 'Expense'], true) ? 'debit' : 'credit');
+
+        GlAccount::query()->where('id', $account)->update([
+            'code' => $validated['code'],
+            'name' => $validated['name'],
+            'name_ar' => $validated['name_ar'] ?? null,
+            'type' => $validated['type'],
+            'category' => $validated['category'] ?? null,
+            'normal_balance' => $normalBalance,
+            'parent_id' => $validated['parent_id'] ?? null,
+            'is_active' => $request->boolean('is_active'),
+            'updated_at' => now(),
         ]);
-
-        DB::table('gl_accounts')
-            ->where('id', $account)
-            ->update([
-                'code' => $validated['code'],
-                'name' => $validated['name'],
-                'name_ar' => $validated['name_ar'] ?? null,
-                'type' => $validated['type'],
-                'parent_id' => $validated['parent_id'] ?? null,
-                'is_active' => $request->boolean('is_active'),
-                'updated_at' => now(),
-            ]);
 
         return redirect()->route('accounting.gl-management.chart-of-accounts')->with('success', __('Account updated successfully'));
     }
 
     public function deleteAccount(int $account)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        DB::table('gl_accounts')->where('id', $account)->delete();
+        GlAccount::query()->where('id', $account)->delete();
 
         return redirect()->route('accounting.gl-management.chart-of-accounts')->with('success', __('Account deleted successfully'));
     }
 
     public function createJournalEntry()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.journal-entry-form', [
             'title' => 'New Journal Entry',
-            'accounts' => DB::table('gl_accounts')->where('is_active', 1)->orderBy('code')->get(),
+            'accounts' => GlAccount::query()->where('is_active', true)->orderBy('code')->get(),
         ]);
     }
 
-    public function storeJournalEntry(Request $request)
+    public function storeJournalEntry(StoreJournalEntryRequest $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'entry_date' => ['required', 'date'],
-            'description' => ['required', 'string', 'max:255'],
-            'status' => ['required', Rule::in(['draft', 'posted'])],
-            'line_account_id' => ['required', 'array', 'min:2'],
-            'line_account_id.*' => ['nullable', 'exists:gl_accounts,id'],
-            'line_description' => ['nullable', 'array'],
-            'line_debit' => ['nullable', 'array'],
-            'line_credit' => ['nullable', 'array'],
-        ]);
+        $validated = $request->validated();
 
         $lines = collect($request->input('line_account_id', []))
             ->map(function ($accountId, $index) use ($request) {
@@ -648,60 +562,42 @@ class AccountingController extends Controller
                     'description' => $request->input("line_description.$index"),
                     'debit' => (float) ($request->input("line_debit.$index") ?: 0),
                     'credit' => (float) ($request->input("line_credit.$index") ?: 0),
+                    'client_id' => $request->input("line_client_id.$index"),
+                    'supplier_id' => $request->input("line_supplier_id.$index"),
+                    'invoice_id' => $request->input("line_invoice_id.$index"),
                 ];
             })
             ->filter(fn ($line) => $line['gl_account_id'] && ($line['debit'] > 0 || $line['credit'] > 0))
-            ->values();
+            ->values()
+            ->all();
 
-        abort_if($lines->count() < 2, 422, 'At least two journal lines are required.');
-
-        $debitTotal = $lines->sum('debit');
-        $creditTotal = $lines->sum('credit');
-
-        abort_unless(abs($debitTotal - $creditTotal) < 0.0001, 422, 'Debits and credits must balance.');
-
-        DB::transaction(function () use ($validated, $lines, $debitTotal) {
-            $entryId = DB::table('gl_journal_entries')->insertGetId([
-                'entry_no' => $this->nextJournalEntryNumber(),
-                'entry_date' => $validated['entry_date'],
-                'description' => $validated['description'],
-                'status' => $validated['status'],
-                'amount' => $debitTotal,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-
-            foreach ($lines as $line) {
-                DB::table('gl_journal_entry_lines')->insert([
-                    'journal_entry_id' => $entryId,
-                    'gl_account_id' => $line['gl_account_id'],
-                    'description' => $line['description'],
-                    'debit' => $line['debit'],
-                    'credit' => $line['credit'],
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
-        });
+        $this->journalPostingService->post([
+            'entry_date' => $validated['entry_date'],
+            'description' => $validated['description'],
+            'status' => $validated['status'],
+            'reference_no' => $validated['reference_no'] ?? null,
+            'source_type' => 'manual_journal',
+            'source_id' => null,
+            'created_by' => auth()->id(),
+            'lines' => $lines,
+        ]);
 
         return redirect()->route('accounting.gl-management.journal-entries')->with('success', __('Journal entry created successfully'));
     }
 
     public function showJournalEntry(int $entry)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $entryRecord = DB::table('gl_journal_entries')->where('id', $entry)->firstOrFail();
-        $lines = DB::table('gl_journal_entry_lines as lines')
-            ->join('gl_accounts as accounts', 'accounts.id', '=', 'lines.gl_account_id')
-            ->where('lines.journal_entry_id', $entry)
-            ->get([
-                'accounts.code',
-                'accounts.name',
-                'lines.description',
-                'lines.debit',
-                'lines.credit',
-            ]);
+        $entryRecord = GlJournalEntry::query()->with(['lines.account'])->findOrFail($entry);
+
+        $lines = $entryRecord->lines->map(fn ($line) => (object) [
+            'code' => $line->account?->code,
+            'name' => $line->account?->name,
+            'description' => $line->line_description ?: $line->description,
+            'debit' => $line->debit,
+            'credit' => $line->credit,
+        ]);
 
         return view('admin.accounting.journal-entry-show', [
             'title' => 'Journal Entry',
@@ -710,15 +606,16 @@ class AccountingController extends Controller
         ]);
     }
 
-    public function saveAccountingMappings(Request $request)
+    public function saveAccountingMappings(SaveAccountingMappingsRequest $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         foreach ($request->input('core', []) as $mappingId => $accountId) {
             DB::table('gl_accounting_mappings')
                 ->where('id', $mappingId)
                 ->update([
                     'gl_account_id' => $accountId ?: null,
+                    'debit_account_id' => $accountId ?: null,
                     'updated_at' => now(),
                 ]);
         }
@@ -726,14 +623,34 @@ class AccountingController extends Controller
         foreach ($request->input('payment_type', []) as $paymentTypeId => $accountId) {
             DB::table('gl_accounting_mappings')->updateOrInsert(
                 ['group_type' => 'payment_type', 'mapping_key' => 'payment_type', 'reference_id' => $paymentTypeId],
-                ['label' => 'Payment Type', 'gl_account_id' => $accountId ?: null, 'updated_at' => now(), 'created_at' => now()]
+                [
+                    'key' => 'payment_type',
+                    'name' => 'Payment Type',
+                    'label' => 'Payment Type',
+                    'gl_account_id' => $accountId ?: null,
+                    'debit_account_id' => $accountId ?: null,
+                    'credit_account_id' => null,
+                    'is_active' => true,
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
             );
         }
 
         foreach ($request->input('expense_category', []) as $categoryId => $accountId) {
             DB::table('gl_accounting_mappings')->updateOrInsert(
                 ['group_type' => 'expense_category', 'mapping_key' => 'expense_category', 'reference_id' => $categoryId],
-                ['label' => 'Expense Category', 'gl_account_id' => $accountId ?: null, 'updated_at' => now(), 'created_at' => now()]
+                [
+                    'key' => 'expense_category',
+                    'name' => 'Expense Category',
+                    'label' => 'Expense Category',
+                    'gl_account_id' => $accountId ?: null,
+                    'debit_account_id' => $accountId ?: null,
+                    'credit_account_id' => null,
+                    'is_active' => true,
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
             );
         }
 
@@ -742,43 +659,46 @@ class AccountingController extends Controller
 
     public function createOpeningBalance()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.opening-balance-form', [
             'title' => 'reports.opening.create',
-            'accounts' => DB::table('gl_accounts')->where('is_active', 1)->orderBy('code')->get(),
+            'accounts' => GlAccount::query()->where('is_active', true)->orderBy('code')->get(),
         ]);
     }
 
-    public function storeOpeningBalance(Request $request)
+    public function storeOpeningBalance(StoreOpeningBalanceRequest $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'entry_date' => ['required', 'date'],
-            'description' => ['required', 'string', 'max:255'],
-            'status' => ['required', Rule::in(['draft', 'posted'])],
-            'gl_account_id' => ['nullable', 'exists:gl_accounts,id'],
-            'amount' => ['required', 'numeric'],
-        ]);
+        $validated = $request->validated();
 
-        DB::table('gl_opening_balances')->insert([
-            'entry_date' => $validated['entry_date'],
-            'entry_no' => $this->nextOpeningBalanceNumber(),
-            'description' => $validated['description'],
-            'status' => $validated['status'],
-            'gl_account_id' => $validated['gl_account_id'] ?? null,
-            'amount' => $validated['amount'],
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        $journal = $this->transactionPostingService->postOpeningBalance(
+            (int) $validated['gl_account_id'],
+            (float) $validated['amount'],
+            $validated['entry_date'],
+            $validated['description'],
+        );
+
+        if (DB::getSchemaBuilder()->hasTable('gl_opening_balances')) {
+            DB::table('gl_opening_balances')->insert([
+                'entry_date' => $validated['entry_date'],
+                'entry_no' => $journal->entry_no,
+                'description' => $validated['description'],
+                'status' => 'posted',
+                'gl_account_id' => $validated['gl_account_id'],
+                'amount' => $validated['amount'],
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
 
         return redirect()->route('accounting.gl-management.opening-balances')->with('success', __('Opening balance created successfully'));
     }
 
     public function createPeriod()
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.period-form', [
             'title' => 'reports.periods.create',
@@ -786,240 +706,58 @@ class AccountingController extends Controller
         ]);
     }
 
-    public function storePeriod(Request $request)
+    public function storePeriod(StorePeriodRequest $request)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'period' => ['required', 'string', 'max:20', 'unique:gl_periods,period'],
-            'status' => ['required', Rule::in(['open', 'closed'])],
-            'notes' => ['nullable', 'string'],
-        ]);
-
-        DB::table('gl_periods')->insert([
-            'period' => $validated['period'],
-            'status' => $validated['status'],
-            'closed_at' => $validated['status'] === 'closed' ? now() : null,
-            'notes' => $validated['notes'] ?? null,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        $validated = $request->validated();
+        $this->periodService->createOrUpdateFromCode($validated['period'], $validated['status'], $validated['notes'] ?? null);
 
         return redirect()->route('accounting.gl-management.periods')->with('success', __('Period created successfully'));
     }
 
     public function editPeriod(int $period)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
         return view('admin.accounting.period-form', [
-            'title' => 'Edit Period',
+            'title' => 'reports.periods.edit',
             'period' => DB::table('gl_periods')->where('id', $period)->firstOrFail(),
         ]);
     }
 
-    public function updatePeriod(Request $request, int $period)
+    public function updatePeriod(UpdatePeriodRequest $request, int $period)
     {
-        $this->ensureGlManagementSetup();
+        $this->setupService->ensureInitialized();
 
-        $validated = $request->validate([
-            'period' => ['required', 'string', 'max:20', Rule::unique('gl_periods', 'period')->ignore($period)],
-            'status' => ['required', Rule::in(['open', 'closed'])],
-            'notes' => ['nullable', 'string'],
-        ]);
-
-        DB::table('gl_periods')->where('id', $period)->update([
-            'period' => $validated['period'],
-            'status' => $validated['status'],
-            'closed_at' => $validated['status'] === 'closed' ? now() : null,
-            'notes' => $validated['notes'] ?? null,
-            'updated_at' => now(),
-        ]);
+        $validated = $request->validated();
+        $this->periodService->createOrUpdateFromCode($validated['period'], $validated['status'], $validated['notes'] ?? null, $period);
 
         return redirect()->route('accounting.gl-management.periods')->with('success', __('Period updated successfully'));
     }
 
-    protected function renderPage(string $title, string $group)
-    {
-        return view('admin.accounting.page', [
-            'title' => $title,
-            'group' => $group,
-        ]);
-    }
-
     protected function baseFilters(Request $request, array $extraKeys = []): array
     {
-        $filters = [
-            'from' => $request->input('from', now()->subMonth()->toDateString()),
-            'to' => $request->input('to', now()->toDateString()),
-        ];
+        $from = $request->input('from', now()->subMonth()->toDateString());
+        $to = $request->input('to', now()->toDateString());
+
+        if (! empty($from) && ! empty($to)) {
+            try {
+                if (\Carbon\Carbon::parse($from)->gt(\Carbon\Carbon::parse($to))) {
+                    [$from, $to] = [$to, $from];
+                }
+            } catch (\Throwable $e) {
+                // Keep raw values.
+            }
+        }
+
+        $filters = ['from' => $from, 'to' => $to];
 
         foreach ($extraKeys as $key) {
             $filters[$key] = $request->input($key);
         }
 
         return $filters;
-    }
-
-    protected function applySaleFilters($query, array $filters, string $table = 'sales'): void
-    {
-        $this->applyDateRange($query, $table . '.sale_date', $filters['from'], $filters['to']);
-
-        if (!empty($filters['warehouse_id'])) {
-            $query->where($table . '.warehouse_id', $filters['warehouse_id']);
-        }
-
-        if (!empty($filters['client_id'])) {
-            $query->where($table . '.client_id', $filters['client_id']);
-        }
-    }
-
-    protected function applyPurchaseFilters($query, array $filters, string $table = 'purchases'): void
-    {
-        $this->applyDateRange($query, $table . '.purchase_date', $filters['from'], $filters['to']);
-
-        if (!empty($filters['warehouse_id'])) {
-            $query->where($table . '.warehouse_id', $filters['warehouse_id']);
-        }
-
-        if (!empty($filters['supplier_id'])) {
-            $query->where($table . '.supplier_id', $filters['supplier_id']);
-        }
-    }
-
-    protected function applyDateRange($query, string $column, ?string $from, ?string $to): void
-    {
-        if (!empty($from)) {
-            $query->whereDate($column, '>=', $from);
-        }
-
-        if (!empty($to)) {
-            $query->whereDate($column, '<=', $to);
-        }
-    }
-
-    protected function receivableRows(array $filters): Collection
-    {
-        return DB::table('sales')
-            ->leftJoin('clients', 'clients.id', '=', 'sales.client_id')
-            ->leftJoinSub(
-                DB::table('payment_sales')
-                    ->select('sale_id', DB::raw('SUM(amount) as paid_total'))
-                    ->groupBy('sale_id'),
-                'payment_totals',
-                'payment_totals.sale_id',
-                '=',
-                'sales.id'
-            )
-            ->when(!empty($filters['warehouse_id']), fn ($query) => $query->where('sales.warehouse_id', $filters['warehouse_id']))
-            ->when(!empty($filters['client_id']), fn ($query) => $query->where('sales.client_id', $filters['client_id']))
-            ->when(!empty($filters['from']), fn ($query) => $query->whereDate('sales.sale_date', '>=', $filters['from']))
-            ->when(!empty($filters['to']), fn ($query) => $query->whereDate('sales.sale_date', '<=', $filters['to']))
-            ->orderByDesc('sales.sale_date')
-            ->orderByDesc('sales.id')
-            ->get([
-                'sales.id',
-                'sales.sale_date',
-                'sales.total_amount',
-                DB::raw("COALESCE(clients.name, 'Walk') as client_name"),
-                DB::raw('COALESCE(payment_totals.paid_total, 0) as paid_total'),
-            ])
-            ->map(function ($row) {
-                $grandTotal = (float) $row->total_amount;
-                $paid = (float) $row->paid_total;
-                $due = max($grandTotal - $paid, 0);
-
-                return [
-                    'id' => $row->id,
-                    'date' => $row->sale_date,
-                    'client_name' => $row->client_name,
-                    'grand_total' => $grandTotal,
-                    'paid' => $paid,
-                    'due' => $due,
-                    'status' => $due <= 0 ? 'Paid' : ($paid > 0 ? 'Partial' : 'Unpaid'),
-                    'status_class' => $due <= 0 ? 'success' : ($paid > 0 ? 'warning' : 'secondary'),
-                ];
-            });
-    }
-
-    protected function payableRows(array $filters): Collection
-    {
-        $paymentsByPurchase = Schema::hasColumn('payments', 'purchase_id')
-            ? DB::table('payments')
-                ->select('purchase_id', DB::raw('SUM(amount) as paid_total'))
-                ->groupBy('purchase_id')
-            : null;
-
-        $query = DB::table('purchases')
-            ->leftJoin('suppliers', 'suppliers.id', '=', 'purchases.supplier_id');
-
-        if ($paymentsByPurchase) {
-            $query->leftJoinSub($paymentsByPurchase, 'payment_totals', 'payment_totals.purchase_id', '=', 'purchases.id');
-        }
-
-        return $query
-            ->when(!empty($filters['warehouse_id']), fn ($builder) => $builder->where('purchases.warehouse_id', $filters['warehouse_id']))
-            ->when(!empty($filters['supplier_id']), fn ($builder) => $builder->where('purchases.supplier_id', $filters['supplier_id']))
-            ->when(!empty($filters['from']), fn ($builder) => $builder->whereDate('purchases.purchase_date', '>=', $filters['from']))
-            ->when(!empty($filters['to']), fn ($builder) => $builder->whereDate('purchases.purchase_date', '<=', $filters['to']))
-            ->orderByDesc('purchases.purchase_date')
-            ->orderByDesc('purchases.id')
-            ->get([
-                'purchases.id',
-                'purchases.purchase_date',
-                'purchases.total_amount',
-                DB::raw("COALESCE(suppliers.name, 'Unknown Supplier') as supplier_name"),
-                DB::raw($paymentsByPurchase ? 'COALESCE(payment_totals.paid_total, 0) as paid_total' : '0 as paid_total'),
-            ])
-            ->map(function ($row) {
-                $grandTotal = (float) $row->total_amount;
-                $paid = (float) $row->paid_total;
-                $due = max($grandTotal - $paid, 0);
-
-                return [
-                    'id' => $row->id,
-                    'date' => $row->purchase_date,
-                    'supplier_name' => $row->supplier_name,
-                    'grand_total' => $grandTotal,
-                    'paid' => $paid,
-                    'due' => $due,
-                    'status' => $due <= 0 ? 'Paid' : ($paid > 0 ? 'Partial' : 'Unpaid'),
-                    'status_class' => $due <= 0 ? 'success' : ($paid > 0 ? 'warning' : 'secondary'),
-                ];
-            });
-    }
-
-    protected function agingBuckets(Collection $rows, string $amountKey, string $dateKey): array
-    {
-        $aging = [
-            '0_30' => 0.0,
-            '31_60' => 0.0,
-            '60_plus' => 0.0,
-        ];
-
-        $today = Carbon::today();
-
-        foreach ($rows as $row) {
-            if (($row[$amountKey] ?? 0) <= 0 || empty($row[$dateKey])) {
-                continue;
-            }
-
-            $days = Carbon::parse($row[$dateKey])->diffInDays($today);
-
-            if ($days <= 30) {
-                $aging['0_30'] += $row[$amountKey];
-                continue;
-            }
-
-            if ($days <= 60) {
-                $aging['31_60'] += $row[$amountKey];
-                continue;
-            }
-
-            $aging['60_plus'] += $row[$amountKey];
-        }
-
-        return $aging;
     }
 
     protected function exportCsv(string $name, array $rows)
@@ -1050,218 +788,5 @@ class AccountingController extends Controller
     protected function money(float $value): string
     {
         return number_format($value, 2, '.', '');
-    }
-
-    protected function ensureGlManagementSetup(): void
-    {
-        if (! Schema::hasTable('gl_accounts')) {
-            return;
-        }
-
-        if (! DB::table('gl_accounts')->exists()) {
-            $seedAccounts = [
-                ['code' => '1000', 'name' => 'Assets', 'name_ar' => 'الأصول', 'type' => 'Asset', 'parent_code' => null],
-                ['code' => '1100', 'name' => 'Current Assets', 'name_ar' => 'الأصول المتداولة', 'type' => 'Asset', 'parent_code' => '1000'],
-                ['code' => '1110', 'name' => 'Cash', 'name_ar' => 'الصندوق', 'type' => 'Asset', 'parent_code' => '1100'],
-                ['code' => '1120', 'name' => 'Bank', 'name_ar' => 'البنك', 'type' => 'Asset', 'parent_code' => '1100'],
-                ['code' => '1130', 'name' => 'Accounts Receivable', 'name_ar' => 'الذمم المدينة', 'type' => 'Asset', 'parent_code' => '1100'],
-                ['code' => '1140', 'name' => 'Inventory', 'name_ar' => 'المخزون', 'type' => 'Asset', 'parent_code' => '1100'],
-                ['code' => '1150', 'name' => 'VAT Input (Recoverable)', 'name_ar' => 'ضريبة مدخلات قابلة للاسترداد', 'type' => 'Asset', 'parent_code' => '1100'],
-                ['code' => '2000', 'name' => 'Liabilities', 'name_ar' => 'الالتزامات', 'type' => 'Liability', 'parent_code' => null],
-                ['code' => '2100', 'name' => 'Current Liabilities', 'name_ar' => 'الالتزامات المتداولة', 'type' => 'Liability', 'parent_code' => '2000'],
-                ['code' => '2110', 'name' => 'Accounts Payable', 'name_ar' => 'الذمم الدائنة', 'type' => 'Liability', 'parent_code' => '2100'],
-                ['code' => '2120', 'name' => 'VAT Output (Payable)', 'name_ar' => 'ضريبة مخرجات مستحقة', 'type' => 'Liability', 'parent_code' => '2100'],
-                ['code' => '3000', 'name' => 'Equity', 'name_ar' => 'حقوق الملكية', 'type' => 'Equity', 'parent_code' => null],
-                ['code' => '3100', 'name' => 'Retained Earnings', 'name_ar' => 'الأرباح المبقاة', 'type' => 'Equity', 'parent_code' => '3000'],
-                ['code' => '4000', 'name' => 'Revenue', 'name_ar' => 'الإيرادات', 'type' => 'Revenue', 'parent_code' => null],
-                ['code' => '4100', 'name' => 'Sales Revenue', 'name_ar' => 'إيرادات المبيعات', 'type' => 'Revenue', 'parent_code' => '4000'],
-                ['code' => '5000', 'name' => 'Expenses', 'name_ar' => 'المصروفات', 'type' => 'Expense', 'parent_code' => null],
-                ['code' => '5100', 'name' => 'Cost of Goods Sold (COGS)', 'name_ar' => 'تكلفة البضاعة المباعة', 'type' => 'Expense', 'parent_code' => '5000'],
-                ['code' => '5999', 'name' => 'General Expense (Unmapped)', 'name_ar' => 'مصروف عام غير مربوط', 'type' => 'Expense', 'parent_code' => '5000'],
-            ];
-
-            foreach ($seedAccounts as $account) {
-                DB::table('gl_accounts')->insert([
-                    'code' => $account['code'],
-                    'name' => $account['name'],
-                    'name_ar' => $account['name_ar'],
-                    'type' => $account['type'],
-                    'parent_id' => $account['parent_code'] ? DB::table('gl_accounts')->where('code', $account['parent_code'])->value('id') : null,
-                    'is_active' => 1,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
-        }
-
-        if (Schema::hasTable('gl_accounting_mappings') && ! DB::table('gl_accounting_mappings')->where('group_type', 'core')->exists()) {
-            foreach ([
-                'accounts_receivable' => ['label' => 'Accounts Receivable (AR) Control', 'account_code' => '1130'],
-                'accounts_payable' => ['label' => 'Accounts Payable (AP) Control', 'account_code' => '2110'],
-                'sales_revenue' => ['label' => 'Sales Revenue', 'account_code' => '4100'],
-                'inventory' => ['label' => 'Inventory (Stock)', 'account_code' => '1140'],
-                'cogs' => ['label' => 'Cost of Goods Sold (COGS)', 'account_code' => '5100'],
-                'vat_output' => ['label' => 'VAT Output (Sales VAT)', 'account_code' => '2120'],
-                'vat_input' => ['label' => 'VAT Input (Purchase VAT)', 'account_code' => '1150'],
-            ] as $key => $mapping) {
-                DB::table('gl_accounting_mappings')->insert([
-                    'group_type' => 'core',
-                    'mapping_key' => $key,
-                    'label' => $mapping['label'],
-                    'reference_id' => null,
-                    'gl_account_id' => DB::table('gl_accounts')->where('code', $mapping['account_code'])->value('id'),
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
-        }
-    }
-
-    protected function accountTypes(): array
-    {
-        return ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'];
-    }
-
-    protected function nextJournalEntryNumber(): string
-    {
-        $nextId = (int) DB::table('gl_journal_entries')->max('id') + 1;
-
-        return 'JE-' . now()->format('Ym') . '-' . str_pad((string) $nextId, 8, '0', STR_PAD_LEFT);
-    }
-
-    protected function nextOpeningBalanceNumber(): string
-    {
-        $nextId = (int) DB::table('gl_opening_balances')->max('id') + 1;
-
-        return 'OB-' . now()->format('Ym') . '-' . str_pad((string) $nextId, 6, '0', STR_PAD_LEFT);
-    }
-
-    protected function glSnapshot(array $filters): array
-    {
-        $salesQuery = DB::table('sales');
-        $this->applySaleFilters($salesQuery, $filters);
-        $revenue = (float) $salesQuery->sum('total_amount');
-        $vatOutput = (float) $salesQuery->sum('tax_amount');
-
-        $receivables = $this->receivableRows($filters)->sum('due');
-        $payables = $this->payableRows($filters)->sum('due');
-
-        $purchasesQuery = DB::table('purchases');
-        $this->applyPurchaseFilters($purchasesQuery, $filters);
-        $vatInput = (float) $purchasesQuery->sum('tax_amount');
-
-        $expensesQuery = DB::table('expenses');
-        $this->applyDateRange($expensesQuery, 'expense_date', $filters['from'] ?? null, $filters['to'] ?? null);
-        $expenses = (float) $expensesQuery->sum('amount');
-
-        $incomingCash = DB::table('payment_sales')
-            ->join('payments', 'payments.id', '=', 'payment_sales.payment_id');
-        $this->applyDateRange($incomingCash, 'payments.payment_date', $filters['from'] ?? null, $filters['to'] ?? null);
-        $incomingCash = (float) $incomingCash->sum(DB::raw('COALESCE(payment_sales.amount, payments.amount, 0)'));
-
-        $outgoingPayments = DB::table('payments')
-            ->whereNotExists(function ($query) {
-                $query->select(DB::raw(1))
-                    ->from('payment_sales')
-                    ->whereColumn('payment_sales.payment_id', 'payments.id');
-            });
-        $this->applyDateRange($outgoingPayments, 'payments.payment_date', $filters['from'] ?? null, $filters['to'] ?? null);
-        $outgoingPayments = (float) $outgoingPayments->sum('payments.amount');
-
-        $purchaseDetails = DB::table('purchase_details')
-            ->join('purchases', 'purchases.id', '=', 'purchase_details.purchase_id');
-        $this->applyPurchaseFilters($purchaseDetails, $filters, 'purchases');
-        $inventoryIn = (float) $purchaseDetails->sum('purchase_details.total_price');
-
-        $saleDetails = DB::table('sale_details')
-            ->join('sales', 'sales.id', '=', 'sale_details.sale_id');
-        $this->applySaleFilters($saleDetails, $filters, 'sales');
-        $inventoryOut = (float) $saleDetails->sum('sale_details.total_price');
-
-        $inventory = $inventoryIn - $inventoryOut;
-        $cash = $incomingCash - $outgoingPayments - $expenses;
-        $netProfit = $revenue - $expenses;
-        $assets = $cash + $receivables + $inventory + $vatInput;
-        $liabilities = $payables + $vatOutput;
-        $equity = $netProfit;
-
-        return [
-            'revenue' => $revenue,
-            'expenses' => $expenses,
-            'net_profit' => $netProfit,
-            'cash' => $cash,
-            'accounts_receivable' => (float) $receivables,
-            'inventory' => $inventory,
-            'vat_input' => $vatInput,
-            'accounts_payable' => (float) $payables,
-            'vat_output' => $vatOutput,
-            'assets' => $assets,
-            'liabilities' => $liabilities,
-            'equity' => $equity,
-        ];
-    }
-
-    protected function glAccounts(array $filters): Collection
-    {
-        $snapshot = $this->glSnapshot($filters);
-
-        return collect([
-            ['code' => '1110', 'account' => 'Cash', 'balance' => $snapshot['cash']],
-            ['code' => '1130', 'account' => 'Accounts Receivable', 'balance' => $snapshot['accounts_receivable']],
-            ['code' => '1140', 'account' => 'Inventory', 'balance' => $snapshot['inventory']],
-            ['code' => '1150', 'account' => 'VAT Input (Recoverable)', 'balance' => $snapshot['vat_input']],
-            ['code' => '2110', 'account' => 'Accounts Payable', 'balance' => -1 * $snapshot['accounts_payable']],
-            ['code' => '2120', 'account' => 'VAT Output (Payable)', 'balance' => -1 * $snapshot['vat_output']],
-            ['code' => '3100', 'account' => 'Current Earnings', 'balance' => -1 * $snapshot['net_profit']],
-            ['code' => '4100', 'account' => 'Sales Revenue', 'balance' => -1 * $snapshot['revenue']],
-            ['code' => '5100', 'account' => 'Operating Expenses', 'balance' => $snapshot['expenses']],
-        ])->map(function ($row) {
-            $balance = (float) $row['balance'];
-
-            return [
-                'code' => $row['code'],
-                'account' => $row['account'],
-                'debit' => $balance > 0 ? $balance : 0.0,
-                'credit' => $balance < 0 ? abs($balance) : 0.0,
-                'balance' => $balance,
-            ];
-        });
-    }
-
-    protected function glVatLines(array $filters): Collection
-    {
-        $salesLines = DB::table('sales')
-            ->when(!empty($filters['from']), fn ($query) => $query->whereDate('sale_date', '>=', $filters['from']))
-            ->when(!empty($filters['to']), fn ($query) => $query->whereDate('sale_date', '<=', $filters['to']))
-            ->orderByDesc('sale_date')
-            ->limit(5)
-            ->get()
-            ->map(fn ($row) => [
-                'date' => $row->sale_date,
-                'entry_no' => 'SAL-' . $row->id,
-                'description' => 'VAT collected on sale',
-                'debit' => 0.0,
-                'credit' => (float) ($row->tax_amount ?? 0),
-            ]);
-
-        $purchaseLines = DB::table('purchases')
-            ->when(!empty($filters['from']), fn ($query) => $query->whereDate('purchase_date', '>=', $filters['from']))
-            ->when(!empty($filters['to']), fn ($query) => $query->whereDate('purchase_date', '<=', $filters['to']))
-            ->orderByDesc('purchase_date')
-            ->limit(5)
-            ->get()
-            ->map(fn ($row) => [
-                'date' => $row->purchase_date,
-                'entry_no' => 'PUR-' . $row->id,
-                'description' => 'VAT paid on purchase',
-                'debit' => (float) ($row->tax_amount ?? 0),
-                'credit' => 0.0,
-            ]);
-
-        return $salesLines
-            ->concat($purchaseLines)
-            ->sortByDesc('date')
-            ->take(8)
-            ->values();
     }
 }

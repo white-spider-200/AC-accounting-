@@ -143,12 +143,26 @@
                             </tbody>
                         </table>
                     </div>
+                    @php
+                        $currentOrderTax = (string) old('order_tax', $purchase->order_tax);
+                        $vatRateValues = collect($vatRates ?? [])->map(fn($rate) => (string) $rate->rate)->all();
+                        $hasCurrentRate = in_array($currentOrderTax, $vatRateValues, true);
+                    @endphp
                     <div class="form-group col-md-3 mt-2">
-                        <label for="order_tax" class=" text-md-right">{{ __('Order Tax') }} % *</label>
+                        <label for="vat_rate_select" class=" text-md-right">{{ __('Order Tax') }} % *</label>
                         <div>
-                            <input type="number" min="0" name="order_tax" id="order_tax" class="form-control"
-                                value="{{ old('order_tax', $purchase->order_tax) }}" placeholder="Order Tax"
-                                step="any" required>
+                            <select id="vat_rate_select" class="form-select">
+                                @foreach ($vatRates ?? [] as $vatRate)
+                                    <option value="{{ $vatRate->rate }}" {{ (string) $vatRate->rate === $currentOrderTax ? 'selected' : '' }}>
+                                        {{ $vatRate->name }} ({{ $vatRate->rate }}%)
+                                    </option>
+                                @endforeach
+                                <option value="__custom__" {{ $hasCurrentRate ? '' : 'selected' }}>{{ __('Custom') }}</option>
+                            </select>
+                            <input type="number" min="0" max="100" id="vat_rate_custom" class="form-control mt-2 {{ $hasCurrentRate ? 'd-none' : '' }}"
+                                value="{{ $hasCurrentRate ? '' : $currentOrderTax }}" placeholder="{{ __('Custom') }} VAT %" step="any">
+                            <input type="hidden" min="0" name="order_tax" id="order_tax" class="form-control"
+                                value="{{ old('order_tax', $purchase->order_tax) }}" step="any" required>
                         </div>
                     </div>
                     <div class="form-group col-md-3 mt-2">
@@ -261,6 +275,37 @@
         });
 
         const orderTaxInput = document.getElementById('order_tax');
+        const vatRateSelect = document.getElementById('vat_rate_select');
+        const vatRateCustom = document.getElementById('vat_rate_custom');
+
+        function syncOrderTaxFromSelection() {
+            if (!vatRateSelect || !orderTaxInput) {
+                return;
+            }
+
+            if (vatRateSelect.value === '__custom__') {
+                if (vatRateCustom) {
+                    vatRateCustom.classList.remove('d-none');
+                    orderTaxInput.value = vatRateCustom.value === '' ? 0 : vatRateCustom.value;
+                }
+            } else {
+                if (vatRateCustom) {
+                    vatRateCustom.classList.add('d-none');
+                }
+                orderTaxInput.value = vatRateSelect.value;
+            }
+            getgrandtotal();
+        }
+
+        if (vatRateSelect) {
+            vatRateSelect.addEventListener('change', syncOrderTaxFromSelection);
+        }
+        if (vatRateCustom) {
+            vatRateCustom.addEventListener('keyup', syncOrderTaxFromSelection);
+            vatRateCustom.addEventListener('blur', syncOrderTaxFromSelection);
+        }
+        syncOrderTaxFromSelection();
+
         orderTaxInput.addEventListener('keyup', function(event) {
             getgrandtotal();
 

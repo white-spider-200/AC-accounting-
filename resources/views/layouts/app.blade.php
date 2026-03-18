@@ -774,7 +774,7 @@
                                 <i class="bi bi-circle"></i><span>{{ __('VAT Summary') }}</span>
                             </a>
                         </li>
-                        <li class="nav-heading pb-0">{{ __('GL Reports') }}</li>
+                        <li class="nav-heading pb-0">{{ __('reports.menu.gl_reports') }}</li>
                         <li>
                             <a href="{{ route('accounting.gl-reports.trial-balance') }}">
                                 <i class="bi bi-circle"></i><span>{{ __('Trial Balance') }}</span>
@@ -795,7 +795,7 @@
                                 <i class="bi bi-circle"></i><span>{{ __('reports.gl.vat_summary') }}</span>
                             </a>
                         </li>
-                        <li class="nav-heading pb-0">{{ __('GL Management') }}</li>
+                        <li class="nav-heading pb-0">{{ __('reports.menu.gl_management') }}</li>
                         <li>
                             <a href="{{ route('accounting.gl-management.chart-of-accounts') }}">
                                 <i class="bi bi-circle"></i><span>{{ __('Chart of Accounts') }}</span>
@@ -821,8 +821,16 @@
                                 <i class="bi bi-circle"></i><span>{{ __('reports.menu.periods') }}</span>
                             </a>
                         </li>
+                        @if (auth()->user()->type == 1)
+                        <li>
+                            <a href="{{ route('accounting.gl-management.vat-rates') }}">
+                                <i class="bi bi-circle"></i><span>{{ __('VAT Options') }}</span>
+                            </a>
+                        </li>
+                        @endif
                     </ul>
                 </li>
+                @if (false)
                 <li class="nav-item">
                     <a class="nav-link @if (!Str::contains(Route::currentRouteName(), 'reports')) collapsed @endif" data-bs-target="#reports"
                         data-bs-toggle="collapse" href="#"
@@ -844,6 +852,7 @@
                         </li>
                     </ul>
                 </li>
+                @endif
 
             </ul>
 

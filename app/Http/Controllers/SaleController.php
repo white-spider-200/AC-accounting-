@@ -10,15 +10,20 @@ use App\Models\Warehouse;
 use App\Models\SaleDetail;
 use App\Models\SaleStatus;
 use App\Models\PaymentType;
+use App\Models\VatRate;
 use Illuminate\Http\Request;
 use App\Models\PaymentSale;
 use App\Models\ProductsCategory;
+use App\Services\Accounting\TransactionPostingService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
 class SaleController extends Controller
 {
+    public function __construct(private readonly TransactionPostingService $transactionPostingService)
+    {
+    }
     /**
      * Display a listing of the resource.
      *
@@ -101,6 +106,7 @@ class SaleController extends Controller
         $salesStatuses = SaleStatus::all();
         $suggestions = [];
         $paymentTypes = PaymentType::all();
+        $vatRates = VatRate::query()->where('is_active', true)->orderBy('sort_order')->orderBy('rate')->get();
         $tempId = uniqid();
         $defaultWareHouse = @$warehouses[0]->id;
         $categories = [];
@@ -118,7 +124,7 @@ class SaleController extends Controller
             $categories  = ProductsCategory::all();
 
         }
-        return view('admin.sales.create', compact('categories','defaultWareHouse','tempId','salesStatuses','paymentTypes', 'warehouses', 'clients','suggestions'));
+        return view('admin.sales.create', compact('categories','defaultWareHouse','tempId','salesStatuses','paymentTypes', 'warehouses', 'clients','suggestions', 'vatRates'));
     }
     public function getProductsByWarehouse(Request $request)
     {
@@ -175,6 +181,8 @@ class SaleController extends Controller
                 DB::commit();
             }
         }
+        $this->transactionPostingService->postSale($id);
+
         if(isset(request()->paid)){
          //in case of pos
 
@@ -215,8 +223,9 @@ class SaleController extends Controller
         $clients = Client::all();
         $salesStatuses = SaleStatus::all();
         $saleDetails = SaleDetail::where('sale_id', $sale-> id)->get();
+        $vatRates = VatRate::query()->where('is_active', true)->orderBy('sort_order')->orderBy('rate')->get();
 
-        return view('admin.sales.edit', compact('saleDetails', 'sale', 'salesStatuses', 'warehouses', 'clients'));
+        return view('admin.sales.edit', compact('saleDetails', 'sale', 'salesStatuses', 'warehouses', 'clients', 'vatRates'));
     }
 
     /**
@@ -286,6 +295,7 @@ class SaleController extends Controller
                 }
             }
 
+            $this->transactionPostingService->postSale($sale->fresh());
             DB::commit();
             return session()->flash('success', __('Sale Added Successfully'));
         } catch (\Exception $e) {
