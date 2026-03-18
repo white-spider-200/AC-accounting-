@@ -1,11 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" @if(app()->getLocale() === 'ar' || session()->get('locale') === 'ar') dir="rtl" @endif>
 
 <head>
     <meta charset="utf-8">
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
 
-    <title>{{ @$allSetting['name']->field_value_en }}</title>
+    <title>
+        @if (app()->getLocale() === 'ar' && !empty(@$allSetting['name']->field_value_ar))
+            {{ @$allSetting['name']->field_value_ar }}
+        @else
+            {{ @$allSetting['name']->field_value_en }}
+        @endif
+    </title>
     <meta content="" name="description">
     <meta content="" name="keywords">
 
