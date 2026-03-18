@@ -169,6 +169,11 @@
             .custom-dir{
                 direction: rtl;
             }
+
+            /* In RTL sidebar, hide tiny submenu bullet icons that appear as trailing dots */
+            .sidebar-nav .nav-content a i.bi-circle {
+                display: none;
+            }
         </style>
     @endif
     <style>
